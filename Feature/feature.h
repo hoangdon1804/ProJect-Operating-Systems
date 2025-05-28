@@ -3,3 +3,7 @@
 #include "help.h"
 #include "cd_command.h"
 #include "signal_handler.h"
+#include "time.h"
+#include "dir.h"
+#include "path.h"
+#include "bat.h"

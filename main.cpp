@@ -2,18 +2,14 @@
 #include <iostream>
 #include <vector>
 #include <string>
-#include "Feature/process.h"
-#include "Feature/signal_handler.h"
-#include "Feature/help.h"
-#include "Feature/cd_command.h"
+#include "Feature/feature.h"
 
 ProcessManager manager; // Global để signal handler truy cập
-PROCESS_INFORMATION foregroundProcess = {0}; // Định nghĩa biến toàn cục
+PROCESS_INFORMATION foregroundProcess = {0};
 
 int main()
 {
     char input[512];
-    DWORD pid = GetCurrentProcessId();
 
     // Đăng ký Ctrl+C
     if (!SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE))
@@ -21,76 +17,100 @@ int main()
         std::cerr << "Failed to set control handler" << std::endl;
         return 1;
     }
-
-    // Intro
-    std::cout << "========================================\n";
-    std::cout << "              Tiny Shell                \n";
-    std::cout << "========================================\n";
-    std::cout << "Welcome to Tiny Shell!\n";
-    std::cout << "PID of Tiny Shell: " << pid << "\n";
-    std::cout << "Type 'help' to see the list of available commands.\n";
-    std::cout << "========================================\n";
-
     while (true)
     {
         std::cout << "my_shell> ";
         if (fgets(input, sizeof(input), stdin) == NULL)
             break;
 
-        input[strcspn(input, "\n")] = '\0'; // Xóa ký tự newline
+        input[strcspn(input, "\n")] = '\0'; // Xóa newline
+
+        if (strlen(input) == 0)
+            continue;
 
         // -------- Built-in Commands --------
-        if (strcmp(input, "exit") == 0)
+        else if (strcmp(input, "exit") == 0)
+        {
+            manager.terminate_all_background();
             break;
-
-        if (strcmp(input, "help") == 0)
+        }
+        else if (strcmp(input, "help") == 0)
         {
             print_help();
             continue;
         }
 
-        if (strncmp(input, "cd ", 3) == 0)
+        else if (strncmp(input, "cd ", 3) == 0)
         {
             handle_cd(input + 3);
             continue;
         }
 
-        if (strcmp(input, "list") == 0)
+        else if (strcmp(input, "list") == 0)
         {
             manager.list_process();
             continue;
         }
 
-        if (strncmp(input, "kill ", 5) == 0)
+        else if (strncmp(input, "kill ", 5) == 0)
         {
             DWORD pid = atoi(input + 5);
             manager.kill_process(pid);
             continue;
         }
 
-        if (strncmp(input, "stop ", 5) == 0)
+        else if (strncmp(input, "stop ", 5) == 0)
         {
             DWORD pid = atoi(input + 5);
-
             manager.stop_process(pid);
             continue;
         }
 
-        if (strncmp(input, "resume ", 7) == 0)
+        else if (strncmp(input, "resume ", 7) == 0)
         {
             DWORD pid = atoi(input + 7);
             manager.resume_process(pid);
             continue;
         }
 
+        // ------- Time-related Commands -------
+        else if (strcmp(input, "date") == 0)
+        {
+            ShellTime::showDate();
+            continue;
+        }
+
+        else if (strcmp(input, "time") == 0)
+        {
+            ShellTime::showTime();
+            continue;
+        }
+
+        else if (strcmp(input, "datetime") == 0)
+        {
+            ShellTime::showDateTime();
+            continue;
+        }
+        else if (strcmp(input, "dir") == 0)
+        {
+            showCurrentDirectoryContents();
+            continue;
+        }
+        else if (strncmp(input, "runbat ", 7) == 0)
+        {
+            std::string batFile = input + 7;
+            execute_bat(batFile);
+            continue;
+        }
+
         // -------- External Commands --------
-        if (strncmp(input, "start_foreground ", 17) == 0)
+        else if (strncmp(input, "start_foreground ", 17) == 0)
         {
             manager.execute_foreground(input + 17);
         }
         else if (strncmp(input, "start_background ", 17) == 0)
         {
-            manager.execute_background(input + 17);
+            manager.execute_background(*(input + 17) ? std::vector<std::string>{input + 17} : std::vector<std::string>{});
         }
         else
         {

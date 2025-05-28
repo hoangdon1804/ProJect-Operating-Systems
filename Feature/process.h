@@ -5,6 +5,10 @@
 #include <string>
 #include <iomanip>
 #include <tlhelp32.h>
+#include <map>
+#include <utility>
+#include <signal.h>
+#include <sstream>
 extern PROCESS_INFORMATION foregroundProcess;
 enum class ProcessStatus
 {
@@ -25,7 +29,7 @@ struct ProcessInfo
 class ProcessManager
 {
 public:
-    std::vector<ProcessInfo> backgroundProcesses;
+    std::map<DWORD, ProcessInfo> backgroundProcesses;
 
     void cleanupProcessHandles(ProcessInfo &proc)
     {
@@ -35,42 +39,6 @@ public:
             CloseHandle(proc.thread);
         proc.handle = nullptr;
         proc.thread = nullptr;
-    }
-
-    bool resumeAllThreads(DWORD pid)
-    {
-        HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-        if (hSnapshot == INVALID_HANDLE_VALUE)
-            return false;
-
-        THREADENTRY32 te32 = {sizeof(THREADENTRY32)};
-        bool success = false;
-
-        if (Thread32First(hSnapshot, &te32))
-        {
-            do
-            {
-                if (te32.th32OwnerProcessID == pid)
-                {
-                    HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, te32.th32ThreadID);
-                    if (hThread)
-                    {
-                        if (ResumeThread(hThread) != (DWORD)-1)
-                        {
-                            success = true;
-                        }
-                        else
-                        {
-                            std::cerr << "Failed to resume thread " << te32.th32ThreadID << "\n";
-                        }
-                        CloseHandle(hThread);
-                    }
-                }
-            } while (Thread32Next(hSnapshot, &te32));
-        }
-
-        CloseHandle(hSnapshot);
-        return success;
     }
 
     bool execute_foreground(const char *command)
@@ -104,39 +72,54 @@ public:
         return true;
     }
 
-    void execute_background(const char *command)
+    void execute_background(const std::vector<std::string> &args)
     {
-        STARTUPINFOA si = {sizeof(si)};
-        PROCESS_INFORMATION pi = {};
-        char cmdline[512];
-        snprintf(cmdline, sizeof(cmdline), "cmd.exe /C \"%s\"", command);
-
-        if (!CreateProcessA(NULL, cmdline, NULL, NULL, FALSE,
-                            CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi))
+        if (args.size() < 1)
         {
-            std::cerr << "Failed to start background process: " << GetLastError() << std::endl;
+            std::cout << "Usage: start <executable_path> [arguments...]" << std::endl;
             return;
         }
 
-        ProcessInfo info = {
-            pi.dwProcessId,
-            command,
-            pi.hProcess,
-            pi.hThread,
-            ProcessStatus::Running};
+        std::string command = args[0];
+        for (size_t i = 1; i < args.size(); ++i)
+        {
+            command += " " + args[i];
+        }
 
-        backgroundProcesses.push_back(info);
-        std::cout << "Started background process: PID = " << pi.dwProcessId << "\n";
+        STARTUPINFOA si = {sizeof(si)};
+        PROCESS_INFORMATION pi;
+        ZeroMemory(&pi, sizeof(pi));
+
+        char *cmd = new char[command.length() + 1];
+        strcpy(cmd, command.c_str());
+
+        if (CreateProcessA(NULL, cmd, NULL, NULL, TRUE, CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi))
+        {
+            ProcessInfo procInfo;
+            procInfo.pid = pi.dwProcessId;
+            procInfo.command = command;
+            procInfo.handle = pi.hProcess;
+            procInfo.thread = pi.hThread;
+            procInfo.status = ProcessStatus::Running;
+            backgroundProcesses[pi.dwProcessId] = procInfo;
+            std::cout << "Started process with PID: " << pi.dwProcessId << std::endl;
+        }
+        else
+        {
+            std::cerr << "Failed to start process: " << GetLastError() << std::endl;
+            delete[] cmd; // Giải phóng bộ nhớ
+            return;
+        }
+
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        delete[] cmd; // Giải phóng bộ nhớ
     }
 
     ProcessInfo *findProcess(DWORD pid)
     {
-        for (auto &proc : backgroundProcesses)
-        {
-            if (proc.pid == pid)
-                return &proc;
-        }
-        return nullptr;
+        auto it = backgroundProcesses.find(pid);
+        return (it != backgroundProcesses.end()) ? &it->second : nullptr;
     }
 
     void stop_process(DWORD pid)
@@ -151,7 +134,7 @@ public:
         THREADENTRY32 te;
         te.dwSize = sizeof(THREADENTRY32);
 
-        // Vì hàm SuspendThread cần tham số là hThread nên cần tìm hThread qua pid
+        int suspendedThreads = 0;
         if (Thread32First(hSnapshot, &te))
         {
             do
@@ -161,14 +144,16 @@ public:
                     HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
                     if (hThread)
                     {
-                        SuspendThread(hThread);
+                        if (SuspendThread(hThread) != (DWORD)-1)
+                        {
+                            suspendedThreads++;
+                        }
                         CloseHandle(hThread);
-                        std::cout << "[Shell] Process " << pid << " stopped.\n";
-                        break;
                     }
                     else
                     {
-                        std::cerr << "Failed to open thread: " << GetLastError() << std::endl;
+                        std::cerr << "Failed to open thread " << te.th32ThreadID
+                                  << ": " << GetLastError() << std::endl;
                     }
                 }
             } while (Thread32Next(hSnapshot, &te));
@@ -179,25 +164,79 @@ public:
         }
 
         CloseHandle(hSnapshot);
+
+        if (suspendedThreads > 0)
+        {
+            std::cout << "[Shell] Suspended " << suspendedThreads
+                      << " thread(s) of process " << pid << ".\n";
+            ProcessInfo *proc = findProcess(pid);
+            if (proc)
+            {
+                proc->status = ProcessStatus::Stopped;
+            }
+        }
+        else
+        {
+            std::cerr << "[Shell] Failed to suspend any thread in process " << pid << ".\n";
+        }
     }
 
     void resume_process(DWORD pid)
     {
-        ProcessInfo *proc = findProcess(pid);
-        if (!proc || proc->status != ProcessStatus::Stopped)
+        HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (hSnapshot == INVALID_HANDLE_VALUE)
         {
-            std::cerr << "Cannot resume process " << pid << ": Not found or not stopped.\n";
+            std::cerr << "CreateToolhelp32Snapshot failed: " << GetLastError() << std::endl;
             return;
         }
 
-        if (resumeAllThreads(pid))
+        THREADENTRY32 te;
+        te.dwSize = sizeof(THREADENTRY32);
+
+        int resumedThreads = 0;
+        if (Thread32First(hSnapshot, &te))
         {
-            proc->status = ProcessStatus::Running;
-            std::cout << "Resumed all threads of process " << pid << ".\n";
+            do
+            {
+                if (te.th32OwnerProcessID == pid)
+                {
+                    HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
+                    if (hThread)
+                    {
+                        if (ResumeThread(hThread) != (DWORD)-1)
+                        {
+                            resumedThreads++;
+                        }
+                        CloseHandle(hThread);
+                    }
+                    else
+                    {
+                        std::cerr << "Failed to open thread " << te.th32ThreadID
+                                  << ": " << GetLastError() << std::endl;
+                    }
+                }
+            } while (Thread32Next(hSnapshot, &te));
         }
         else
         {
-            std::cerr << "Failed to resume all threads of process " << pid << ".\n";
+            std::cerr << "Thread32First failed: " << GetLastError() << std::endl;
+        }
+
+        CloseHandle(hSnapshot);
+
+        if (resumedThreads > 0)
+        {
+            std::cout << "[Shell] Resumed " << resumedThreads
+                      << " thread(s) of process " << pid << ".\n";
+            ProcessInfo *proc = findProcess(pid);
+            if (proc)
+            {
+                proc->status = ProcessStatus::Running;
+            }
+        }
+        else
+        {
+            std::cerr << "[Shell] Failed to resume any thread in process " << pid << ".\n";
         }
     }
 
@@ -229,7 +268,6 @@ public:
         cleanupProcessHandles(*proc);
         std::cout << "Terminated process " << pid << ".\n";
     }
-
     void list_process()
     {
         std::cout << "\nBackground Processes:\n";
@@ -239,9 +277,9 @@ public:
                   << "Command\n";
         std::cout << std::string(50, '-') << "\n";
 
-        std::vector<ProcessInfo> activeProcesses;
+        std::vector<DWORD> toErase;
 
-        for (auto &proc : backgroundProcesses)
+        for (auto &[pid, proc] : backgroundProcesses)
         {
             DWORD waitCode = WaitForSingleObject(proc.handle, 0);
             if (waitCode == WAIT_OBJECT_0)
@@ -268,13 +306,17 @@ public:
                       << std::setw(15) << statusStr
                       << proc.command << "\n";
 
-            if (proc.status != ProcessStatus::Terminated)
-                activeProcesses.push_back(proc);
-            else
+            if (proc.status == ProcessStatus::Terminated)
+            {
                 cleanupProcessHandles(proc);
+                toErase.push_back(pid);
+            }
         }
 
-        backgroundProcesses = std::move(activeProcesses);
+        for (DWORD pid : toErase)
+        {
+            backgroundProcesses.erase(pid);
+        }
     }
 
     void waitForChildProcesses(DWORD parentPID)
@@ -331,5 +373,16 @@ public:
         }
 
         CloseHandle(hSnapshot);
+    }
+
+    void terminate_all_background()
+    {
+        for (const auto &proc : backgroundProcesses)
+        {
+            if (proc.second.status == ProcessStatus::Running)
+            {
+                kill_process(proc.second.pid);
+            }
+        }
     }
 };
