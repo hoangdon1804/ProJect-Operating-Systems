@@ -4,7 +4,8 @@
 #include <vector>
 #include <string>
 #include <iomanip>
-
+#include <tlhelp32.h>
+extern PROCESS_INFORMATION foregroundProcess;
 enum class ProcessStatus
 {
     Running,
@@ -24,73 +25,110 @@ struct ProcessInfo
 class ProcessManager
 {
 public:
-    static PROCESS_INFORMATION pi;
     std::vector<ProcessInfo> backgroundProcesses;
 
-    // Tiến trình foreground
+    void cleanupProcessHandles(ProcessInfo &proc)
+    {
+        if (proc.handle)
+            CloseHandle(proc.handle);
+        if (proc.thread)
+            CloseHandle(proc.thread);
+        proc.handle = nullptr;
+        proc.thread = nullptr;
+    }
+
+    bool resumeAllThreads(DWORD pid)
+    {
+        HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (hSnapshot == INVALID_HANDLE_VALUE)
+            return false;
+
+        THREADENTRY32 te32 = {sizeof(THREADENTRY32)};
+        bool success = false;
+
+        if (Thread32First(hSnapshot, &te32))
+        {
+            do
+            {
+                if (te32.th32OwnerProcessID == pid)
+                {
+                    HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, te32.th32ThreadID);
+                    if (hThread)
+                    {
+                        if (ResumeThread(hThread) != (DWORD)-1)
+                        {
+                            success = true;
+                        }
+                        else
+                        {
+                            std::cerr << "Failed to resume thread " << te32.th32ThreadID << "\n";
+                        }
+                        CloseHandle(hThread);
+                    }
+                }
+            } while (Thread32Next(hSnapshot, &te32));
+        }
+
+        CloseHandle(hSnapshot);
+        return success;
+    }
+
     bool execute_foreground(const char *command)
     {
         STARTUPINFOA si = {sizeof(si)};
-        ZeroMemory(&pi, sizeof(pi));
-
+        PROCESS_INFORMATION pi = {};
         char cmdline[512];
-        snprintf(cmdline, sizeof(cmdline), "cmd.exe /C %s", command);
+        snprintf(cmdline, sizeof(cmdline), "cmd.exe /C \"%s\"", command);
 
-        if (!CreateProcessA(
-                NULL,
-                cmdline,
-                NULL,
-                NULL,
-                TRUE,
-                0,
-                NULL,
-                NULL,
-                &si,
-                &pi))
+        if (!CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi))
         {
             std::cerr << "CreateProcess failed: " << GetLastError() << std::endl;
             return false;
         }
 
+        // Cập nhật foregroundProcess trước khi chờ
+        foregroundProcess = pi;
+
         WaitForSingleObject(pi.hProcess, INFINITE);
 
-        if (pi.hProcess)
-            CloseHandle(pi.hProcess);
-        if (pi.hThread)
-            CloseHandle(pi.hThread);
-        pi.hProcess = NULL;
-        pi.hThread = NULL;
+        // Sau khi tiến trình kết thúc, giải phóng handle và đặt lại
+        if (foregroundProcess.hProcess == pi.hProcess)
+        {
+            CloseHandle(foregroundProcess.hProcess);
+            CloseHandle(foregroundProcess.hThread);
+            foregroundProcess.hProcess = NULL;
+            foregroundProcess.hThread = NULL;
+        }
 
+        waitForChildProcesses(pi.dwProcessId);
         return true;
     }
 
-    // Tiến trình background
     void execute_background(const char *command)
     {
         STARTUPINFOA si = {sizeof(si)};
-        PROCESS_INFORMATION local_pi = {};
-
+        PROCESS_INFORMATION pi = {};
         char cmdline[512];
-        snprintf(cmdline, sizeof(cmdline), "cmd.exe /C %s", command);
+        snprintf(cmdline, sizeof(cmdline), "cmd.exe /C \"%s\"", command);
 
         if (!CreateProcessA(NULL, cmdline, NULL, NULL, FALSE,
-                            CREATE_NEW_CONSOLE, NULL, NULL, &si, &local_pi))
+                            CREATE_NEW_CONSOLE, NULL, NULL, &si, &pi))
         {
             std::cerr << "Failed to start background process: " << GetLastError() << std::endl;
             return;
         }
 
         ProcessInfo info = {
-            local_pi.dwProcessId,
+            pi.dwProcessId,
             command,
-            local_pi.hProcess,
-            local_pi.hThread,
+            pi.hProcess,
+            pi.hThread,
             ProcessStatus::Running};
+
         backgroundProcesses.push_back(info);
-        std::cout << "Started background process: PID = " << local_pi.dwProcessId << "\n";
+        std::cout << "Started background process: PID = " << pi.dwProcessId << "\n";
     }
 
-    // Tìm tiến trình background theo PID
     ProcessInfo *findProcess(DWORD pid)
     {
         for (auto &proc : backgroundProcesses)
@@ -101,28 +139,48 @@ public:
         return nullptr;
     }
 
-    // Dừng (suspend) tiến trình background
     void stop_process(DWORD pid)
     {
-        ProcessInfo *proc = findProcess(pid);
-        if (!proc || proc->status != ProcessStatus::Running)
+        HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if (hSnapshot == INVALID_HANDLE_VALUE)
         {
-            std::cerr << "Cannot stop process " << pid << ": Not found or not running.\n";
+            std::cerr << "CreateToolhelp32Snapshot failed: " << GetLastError() << std::endl;
             return;
         }
 
-        if (SuspendThread(proc->thread) == (DWORD)-1)
+        THREADENTRY32 te;
+        te.dwSize = sizeof(THREADENTRY32);
+
+        // Vì hàm SuspendThread cần tham số là hThread nên cần tìm hThread qua pid
+        if (Thread32First(hSnapshot, &te))
         {
-            std::cerr << "Failed to suspend process " << pid << ".\n";
+            do
+            {
+                if (te.th32OwnerProcessID == pid)
+                {
+                    HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
+                    if (hThread)
+                    {
+                        SuspendThread(hThread);
+                        CloseHandle(hThread);
+                        std::cout << "[Shell] Process " << pid << " stopped.\n";
+                        break;
+                    }
+                    else
+                    {
+                        std::cerr << "Failed to open thread: " << GetLastError() << std::endl;
+                    }
+                }
+            } while (Thread32Next(hSnapshot, &te));
         }
         else
         {
-            proc->status = ProcessStatus::Stopped;
-            std::cout << "Suspended process " << pid << ".\n";
+            std::cerr << "Thread32First failed: " << GetLastError() << std::endl;
         }
+
+        CloseHandle(hSnapshot);
     }
 
-    // Tiếp tục (resume) tiến trình background
     void resume_process(DWORD pid)
     {
         ProcessInfo *proc = findProcess(pid);
@@ -132,18 +190,17 @@ public:
             return;
         }
 
-        if (ResumeThread(proc->thread) == (DWORD)-1)
+        if (resumeAllThreads(pid))
         {
-            std::cerr << "Failed to resume process " << pid << ".\n";
+            proc->status = ProcessStatus::Running;
+            std::cout << "Resumed all threads of process " << pid << ".\n";
         }
         else
         {
-            proc->status = ProcessStatus::Running;
-            std::cout << "Resumed process " << pid << ".\n";
+            std::cerr << "Failed to resume all threads of process " << pid << ".\n";
         }
     }
 
-    // Kết thúc tiến trình background
     void kill_process(DWORD pid)
     {
         ProcessInfo *proc = findProcess(pid);
@@ -153,24 +210,33 @@ public:
             return;
         }
 
-        if (!TerminateProcess(proc->handle, 0))
+        std::vector<DWORD> childPIDs;
+        findAllChildProcesses(pid, childPIDs);
+
+        for (DWORD childPID : childPIDs)
         {
-            std::cerr << "Failed to terminate process " << pid << ".\n";
-            return;
+            HANDLE hChild = OpenProcess(PROCESS_TERMINATE, FALSE, childPID);
+            if (hChild)
+            {
+                TerminateProcess(hChild, 0);
+                std::cout << "Terminated child process: " << childPID << "\n";
+                CloseHandle(hChild);
+            }
         }
 
+        TerminateProcess(proc->handle, 0);
         proc->status = ProcessStatus::Terminated;
+        cleanupProcessHandles(*proc);
         std::cout << "Terminated process " << pid << ".\n";
     }
 
-    // Hiển thị danh sách tiến trình background
     void list_process()
     {
         std::cout << "\nBackground Processes:\n";
         std::cout << std::left
                   << std::setw(10) << "PID"
                   << std::setw(15) << "Status"
-                  << "Command" << "\n";
+                  << "Command\n";
         std::cout << std::string(50, '-') << "\n";
 
         std::vector<ProcessInfo> activeProcesses;
@@ -203,21 +269,67 @@ public:
                       << proc.command << "\n";
 
             if (proc.status != ProcessStatus::Terminated)
-            {
                 activeProcesses.push_back(proc);
-            }
             else
-            {
-                if (proc.handle)
-                    CloseHandle(proc.handle);
-                if (proc.thread)
-                    CloseHandle(proc.thread);
-            }
+                cleanupProcessHandles(proc);
         }
 
         backgroundProcesses = std::move(activeProcesses);
     }
-};
 
-// Định nghĩa biến static
-PROCESS_INFORMATION ProcessManager::pi = {};
+    void waitForChildProcesses(DWORD parentPID)
+    {
+        HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (hSnapshot == INVALID_HANDLE_VALUE)
+            return;
+
+        PROCESSENTRY32 pe32 = {sizeof(pe32)};
+        std::vector<DWORD> childPIDs;
+
+        if (Process32First(hSnapshot, &pe32))
+        {
+            do
+            {
+                if (pe32.th32ParentProcessID == parentPID)
+                    childPIDs.push_back(pe32.th32ProcessID);
+            } while (Process32Next(hSnapshot, &pe32));
+        }
+
+        CloseHandle(hSnapshot);
+
+        for (DWORD pid : childPIDs)
+        {
+            HANDLE hChild = OpenProcess(SYNCHRONIZE, FALSE, pid);
+            if (hChild)
+            {
+                WaitForSingleObject(hChild, INFINITE);
+                CloseHandle(hChild);
+                waitForChildProcesses(pid);
+            }
+        }
+    }
+
+    void findAllChildProcesses(DWORD parentPID, std::vector<DWORD> &childPIDs)
+    {
+        HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (hSnapshot == INVALID_HANDLE_VALUE)
+            return;
+
+        PROCESSENTRY32 pe32 = {sizeof(pe32)};
+
+        if (Process32First(hSnapshot, &pe32))
+        {
+            do
+            {
+                if (pe32.th32ParentProcessID == parentPID)
+                {
+                    DWORD childPID = pe32.th32ProcessID;
+                    childPIDs.push_back(childPID);
+                    findAllChildProcesses(childPID, childPIDs);
+                }
+            } while (Process32Next(hSnapshot, &pe32));
+        }
+
+        CloseHandle(hSnapshot);
+    }
+};

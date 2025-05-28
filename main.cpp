@@ -8,6 +8,7 @@
 #include "Feature/cd_command.h"
 
 ProcessManager manager; // Global để signal handler truy cập
+PROCESS_INFORMATION foregroundProcess = {0}; // Định nghĩa biến toàn cục
 
 int main()
 {
@@ -70,6 +71,7 @@ int main()
         if (strncmp(input, "stop ", 5) == 0)
         {
             DWORD pid = atoi(input + 5);
+
             manager.stop_process(pid);
             continue;
         }
