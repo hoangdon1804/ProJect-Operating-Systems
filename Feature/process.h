@@ -6,9 +6,7 @@
 #include <iomanip>
 #include <tlhelp32.h>
 #include <map>
-#include <utility>
-#include <signal.h>
-#include <sstream>
+
 extern PROCESS_INFORMATION foregroundProcess;
 enum class ProcessStatus
 {
@@ -183,6 +181,22 @@ public:
 
     void resume_process(DWORD pid)
     {
+        // Bước 1: Tìm tiến trình trong danh sách
+        ProcessInfo *proc = findProcess(pid);
+        if (!proc)
+        {
+            std::cerr << "[Shell] No such process with PID " << pid << ".\n";
+            return;
+        }
+
+        // Bước 2: Kiểm tra trạng thái
+        if (proc->status != ProcessStatus::Stopped)
+        {
+            std::cout << "[Shell] Process " << pid << " is not in 'Stopped' state. Resume skipped.\n";
+            return;
+        }
+
+        // Bước 3: Snapshot tất cả các thread
         HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
         if (hSnapshot == INVALID_HANDLE_VALUE)
         {
@@ -228,11 +242,7 @@ public:
         {
             std::cout << "[Shell] Resumed " << resumedThreads
                       << " thread(s) of process " << pid << ".\n";
-            ProcessInfo *proc = findProcess(pid);
-            if (proc)
-            {
-                proc->status = ProcessStatus::Running;
-            }
+            proc->status = ProcessStatus::Running;
         }
         else
         {
@@ -268,6 +278,7 @@ public:
         cleanupProcessHandles(*proc);
         std::cout << "Terminated process " << pid << ".\n";
     }
+
     void list_process()
     {
         std::cout << "\nBackground Processes:\n";

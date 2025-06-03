@@ -2,8 +2,6 @@
 #include <tchar.h>
 #include <cstdio>
 
-// To compile: g++ -o countdown countdown.cpp -lgdi32
-
 #define IDT_TIMER1 1
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
@@ -14,21 +12,16 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
     switch (uMsg)
     {
     case WM_CREATE:
-        // Set a timer to update the counter every second
-        SetTimer(hwnd, IDT_TIMER1, 1000, (TIMERPROC)NULL);
-        // Create a font for the text
-        hFont = CreateFont(72, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                           OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS,
-                           _T("Arial"));
+        SetTimer(hwnd, IDT_TIMER1, 1000, NULL);
+        hFont = CreateFontW(72, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS,
+                            L"Arial");
         break;
     case WM_TIMER:
         if (wParam == IDT_TIMER1)
         {
-            // Decrement the counter
             counter--;
-            // Invalidate the window to force a redraw
             InvalidateRect(hwnd, NULL, TRUE);
-            // Close the window when the counter reaches 0
             if (counter < 0)
             {
                 KillTimer(hwnd, IDT_TIMER1);
@@ -40,20 +33,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
     {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
-        // Set the background color
         SetBkColor(hdc, RGB(255, 255, 255));
-        // Set the text color
         SetTextColor(hdc, RGB(0, 0, 0));
-        // Select the font into the DC
         SelectObject(hdc, hFont);
-        // Convert the counter to a string
-        TCHAR szCounter[3];
-        _stprintf(szCounter, _T("%d"), counter);
-        // Get the dimensions of the window
+        WCHAR szCounter[16];
+        swprintf(szCounter, 16, L"%d", counter);
         RECT rect;
         GetClientRect(hwnd, &rect);
-        // Draw the text in the center of the window
-        DrawText(hdc, szCounter, -1, &rect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+        DrawTextW(hdc, szCounter, -1, &rect, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
         EndPaint(hwnd, &ps);
     }
     break;
@@ -62,25 +49,25 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
         PostQuitMessage(0);
         break;
     default:
-        return DefWindowProc(hwnd, uMsg, wParam, lParam);
+        return DefWindowProcW(hwnd, uMsg, wParam, lParam);
     }
     return 0;
 }
 
-int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmdLine, int nCmdShow)
+int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCmdShow)
 {
-    const TCHAR szWindowClass[] = _T("CountdownApp");
-    const TCHAR szTitle[] = _T("Countdown Timer");
+    const wchar_t szWindowClass[] = L"CountdownApp";
+    const wchar_t szTitle[] = L"Countdown Timer";
 
-    WNDCLASS wc = {};
+    WNDCLASSW wc = {};
     wc.lpfnWndProc = WindowProc;
     wc.hInstance = hInstance;
     wc.lpszClassName = szWindowClass;
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
 
-    RegisterClass(&wc);
+    RegisterClassW(&wc);
 
-    HWND hwnd = CreateWindowEx(
+    HWND hwnd = CreateWindowExW(
         0,
         szWindowClass,
         szTitle,
@@ -100,10 +87,10 @@ int APIENTRY _tWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCm
     UpdateWindow(hwnd);
 
     MSG msg = {};
-    while (GetMessage(&msg, NULL, 0, 0))
+    while (GetMessageW(&msg, NULL, 0, 0) > 0)
     {
         TranslateMessage(&msg);
-        DispatchMessage(&msg);
+        DispatchMessageW(&msg);
     }
 
     return (int)msg.wParam;

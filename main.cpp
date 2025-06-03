@@ -102,7 +102,16 @@ int main()
             execute_bat(batFile);
             continue;
         }
-
+        else if (strncmp(input, "path", 4) == 0)
+        {
+            show_path();
+            continue;
+        }
+        else if (strncmp(input, "addpath ", 8) == 0)
+        {
+            add_path(input + 8);
+            continue;
+        }
         // -------- External Commands --------
         else if (strncmp(input, "start_foreground ", 17) == 0)
         {
